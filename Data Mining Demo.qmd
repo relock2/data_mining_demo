@@ -1,0 +1,1166 @@
+---
+title: "Data Mining Example"
+author: "Reese Locken"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: default
+    self_contained: true
+---
+
+```{r setup, include = FALSE}
+
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+
+```
+
+```{r libraries, echo = FALSE}
+
+# List of required packages
+required_packages <- c("tidyverse", "ggplot2", "readxl", "janitor", 
+                       "lubridate", "vcd", "magrittr", "knitr", "car", "tidymodels"                        ,"ranger"
+                       )
+
+# Function to check and install missing packages
+install_if_missing <- function(packages) {
+  for (pkg in packages) {
+    if (!require(pkg, character.only = TRUE)) {
+      install.packages(pkg, dependencies = TRUE)
+      library(pkg, character.only = TRUE)
+    }
+  }
+}
+
+# Install and load required packages
+install_if_missing(required_packages)
+
+library(tidyverse)
+library(ggplot2)
+library(readxl)
+library(janitor)
+library(lubridate)
+library(vcd)
+library(magrittr)
+library(knitr)
+library(car)
+library(tidymodels)
+
+```
+
+```{r ingest_data, echo = FALSE}
+
+data <- suppressMessages(suppressWarnings(read_excel('Book1 - Data_Mining.xlsx')))
+```
+
+# Introduction
+
+The old saying goes: "There is no such thing as bad press." I believe Boeing, Firestone, and Equifax would beg to differ, as would several of the entities in our data below.
+
+In this data mining challenge, we will examine a dataset containing records of data breaches reported from 2004 to 2019. The breaches vary in size, type, and location.
+
+We will clean and explore the dataset and use it to build a predictive model that business stakeholders can use to determine the potential impact of their own breach.
+
+# Understand Data
+
+First, we must learn the essence of the dataset and generate a few ideas about what it can be used for.
+
+Let's take a look:
+
+```{r data_head}
+
+kable(head(data, 1))
+
+kable(colnames(data), col.names = 'Column Names')
+
+cat('The data has', dim(data)[1], 'rows and', dim(data)[2], 'columns.')
+
+```
+
+The data set appears to contain records of data breaches that have been reported on in the media. This could be useful to our organization in a few ways:
+
+-   We could examine breach patterns to see what we need to watch out for, especially in our own industry, with similar entities, and the types of data we are most obligated to protect.
+
+-   We could identify the types of breaches that put us at the highest risk of becoming an "interesting story" (not the kind of press we're looking for!).
+
+-   We could select the reporting sources we should most closely watch to keep an eye on breach activity over time.
+
+# Prepare Data
+
+Before we can work with our data, we need to clean it. Let's look through what we have and fix any issues we find.
+
+The first row appears to contain data definitions. We will list these and remove them from our data set.
+
+**Data Definitions**
+
+*YEAR*: year story broke
+
+*sector*: web, healthcare, app, retail, gaming, transport, financial, tech government, telecoms, legal, media, academic, energy, military
+
+*METHOD*: poor security, hacked, oops!, lost device, inside job
+
+*DATA SENSITIVITY*:
+
+1\. Just email address/Online information
+
+2 SSN/Personal details
+
+3 Credit card information
+
+4 Health & other personal records
+
+5 Full details
+
+*DISPLAYED RECORDS*: If records lost is greater than 100 million, then that value appears in this column. Otherwise, it is blank.
+
+Now we can remove that row.
+
+cat('Rows remaining:', rows_after_removal)
+
+```{r remove_first_row}
+
+rows_before_removal <- data |> summarize(N = n()) |> pull()
+
+data <- data |> 
+          filter(!row_number() == 1)
+
+rows_after_removal <- data |> summarize(N = n()) |> pull()
+
+cat('Rows removed:', rows_before_removal - rows_after_removal, '\n')
+cat('Rows remaining:', rows_after_removal)
+```
+
+Additionally, the eleventh column appears to be empty. Let's confirm.
+
+```{r check_if_eleventh_empty}
+
+data |> 
+  select(11) |> 
+  unique() |> 
+  pull()
+
+```
+
+Having confirmed that the eleventh column is empty, we will drop it.
+
+```{r drop_eleventh_col}
+
+cols_before_removal <- length(colnames(data))
+
+data <- data |> 
+          select(-11)
+
+cols_after_removal <- length(colnames(data))
+
+cat('Columns removed:', cols_before_removal - cols_after_removal, '\n')
+cat('Columns remaining:', cols_after_removal)
+
+```
+
+Now let's standardize the column names and make them easier to manipulate.
+
+```{r tidy_colnames}
+
+data <- janitor::clean_names(data)
+
+kable(colnames(data), col.names = 'Column Names')
+
+```
+
+With standardized column names, we can now check for nulls and data quality issues.
+
+```{r check_nulls}
+
+kable(colSums(is.na(data)), col.names = c('Column', 'Null Count'))
+        
+```
+
+Four columns have nulls for the majority of rows:
+
+-   alternative_name
+-   interesting_story
+-   displayed_records
+-   x2nd_source_link
+
+Additionally, there is one missing row in records_lost. Let's return to that.
+
+In terms of null values, displayed_records is not a surprise, since it is explicitly programmed to only return a value when records_lost exceeds a certain value.
+
+We will address those nulls in a moment. But first, let's check out our data types and values.
+
+```{r data_types}
+
+column_info <- data |> 
+  summarise_all(class) |> 
+  gather(key = "column_name", value = "data_type")
+
+# Print the column information
+kable(column_info)
+```
+
+Everything is currently stored as a character. That seems appropriate for most values, but I expect the following should be different:
+
+-   records_lost =\> integer
+-   year =\> time
+-   interesting_story =\> factor
+-   data_sensitivity =\> factor
+-   displayed_records =\> integer
+
+Before changing these data types, let's check if there are any inappropriate values that would prevent conversion.
+
+We know that there is a null value in records_lost, so let's start there.
+
+```{r records_lost_null}
+
+data |> 
+  filter(is.na(records_lost)) |> 
+  kable()
+
+```
+
+Upon visiting the provided link, the null appears to be valid. The report does not include any details on the number of records lost. We will keep this record unchanged.
+
+What about records_lost?
+
+```{r records_lost_types}
+
+# Check all unique values in records_lost
+data |> 
+  filter(str_detect(records_lost, "\\D")) |> 
+  group_by(records_lost) |> 
+  summarize(N = n()) |> 
+  arrange(desc(N)) |> 
+  kable()
+
+```
+
+A few records contain values that cannot be converted easily to integers. Let's address them one at a time.
+
+```{r unconvertable_records_lost_all}
+
+data |> 
+  filter(records_lost == 'ALL') |> 
+  kable()
+
+```
+
+For the "ALL" values, the text of the articles contains the counts we need:
+
+-   Animoto - 25 million
+
+-   CoffeeMeetsBagel - 6 million
+
+-   Petflow - 1 million
+
+We'll replace "ALL" with those values later.
+
+```{r unconvertable_records_lost_lessthan}
+
+data |> 
+  filter(records_lost %in% c("<3000000", "<5000000")) |> 
+  kable()
+
+```
+
+These articles do not contain values we can impute. However, based on the fact that "up to" estimates are often near the true value (e.g. you say "we're in the top 10" if you're ranked ninth, not "we're in the top 20"), I think it is safe to impute the values provided minus one.
+
+Thus, we can now replace our text values with integers and change the data type.
+
+```{r records_lost_impute}
+
+num_rows_to_change <- data |> 
+  filter(str_detect(records_lost, "\\D")) |> 
+  summarize(N = n()) |> 
+  pull()
+
+data <- data |> 
+          mutate(records_lost = case_when(
+                (records_lost == 'ALL' & entity == 'Animoto') ~ 25000000,
+                (records_lost == 'ALL' & entity == 'CoffeeMeetsBagel') ~ 6000000,
+                (records_lost == 'ALL' & entity == 'Petflow') ~ 1000000,
+                records_lost == '10M' ~ 10000000,
+                records_lost == '3M' ~ 3000000,
+                records_lost == '<5000000' ~ 5000000 - 1,
+                records_lost == '<3000000' ~ 3000000 - 1,
+                TRUE ~ as.integer(records_lost)
+              ))
+
+cat('Rows affected:', num_rows_to_change)
+```
+
+Next, let's check our year variable.
+
+```{r check_year}
+
+data |> 
+  group_by(year) |> 
+  summarize(N = n()) |> 
+  kable()
+
+```
+
+There are no problematic values here, so we can change it to a date.
+
+```{r year_to_date}
+
+data <- data |> 
+  mutate(year = year(ymd(paste0(year, "-01-01"))))
+
+```
+
+Let's handle interesting_story next. We can replace the current variables with more descriptive ones.
+
+```{r change_interesting_story}
+
+data |> 
+  group_by(interesting_story) |> 
+  summarize(N = n()) |> 
+  kable()
+
+data <- data |> 
+          mutate(interesting_story = factor(ifelse(is.na(interesting_story), 
+                                                   'No', 'Yes'), 
+                                        levels = c('No', 'Yes')))
+```
+
+data_sensitivity has an unexpected value. Let's investigate before converting.
+
+```{r check_data_sensitivity}
+
+data |> 
+  group_by(data_sensitivity) |> 
+  summarize(N = n()) |> 
+  kable()
+
+data |> 
+  filter(data_sensitivity == '7') |> 
+  kable()
+
+data |> 
+  filter(x1st_source_link == 'https://www.theregister.co.uk/2019/02/11/620_million_hacked_accounts_dark_web/') |> 
+  kable()
+
+```
+
+All other breaches from that same source have data_sensitivity = 1. So we will change the 7 to 1 for this record.
+
+```{r change_data_sensitivity}
+
+num_rows_change <- data |> 
+                      filter(data_sensitivity == '7') |> 
+                      summarize(N = n()) |> 
+                      pull()
+
+data <- data |> 
+            mutate(data_sensitivity = factor(ifelse(data_sensitivity == '7', 1, 
+                                                    data_sensitivity),
+                                      levels = c('1', '2', '3', '4', '5')))
+cat('Rows affected:', num_rows_change)
+```
+
+Finally, because displayed_records is based on a rule, we can simply re-create the rule to populate the column.
+
+```{r recreate_displayed_records}
+
+data <- data |> 
+          mutate(displayed_records = ifelse(records_lost > 100000000, 
+                                            records_lost, NA))
+
+```
+
+Let's clean up the other columns. I have removed some of my exploratory code, but the process for each column was the same: I harmonized similar values under one category (e.g. Snapchat) and checked article links to determine appropriate categories.
+
+```{r clean_other_columns}
+
+# Clean entity
+
+data <- data |> 
+          mutate(entity = gsub('"','', entity)) |> 
+          mutate(entity = gsub('Snapchat', 'SnapChat', entity)) |> 
+          mutate(entity = ifelse(entity == 'US Office of Personnel Management (2nd Breach)', 'US Office of Personnel Management', entity)) |>
+          # This record appears to be a duplicate of the LinkedIn and Last.fm breaches, with no data about eHarmony's count of lost passwords
+          filter(entity != 'LinkedIn, eHarmony, Last.fm')
+
+
+# Clean story
+
+data <- data |> 
+        # This is a duplicate story, with a less accurate count of lost documents
+        # I have retained the other record and credited the story to The Guardian
+        filter(alternative_name != 'Wikileaks / Bradley Manning/Cablegate.' | is.na(alternative_name)) |> 
+        mutate(source_name = ifelse(source_name == 'Guardian, Wikileaks', 'Guardian', source_name))
+
+
+# Clean source_name
+# If there were two listed sources, I chose to credit the first listed source
+# One could also split the source_name column into two: source_1 and source_2
+
+data <- data |> 
+        mutate(source_name = ifelse(source_name == 'Guardian', 'The Guardian', source_name)) |> 
+        mutate(source_name = ifelse(source_name == 'ZD Net', 'ZDNet', source_name)) |> 
+        mutate(source_name = ifelse(source_name == 'Washington-Post', 'Washington Post', source_name)) |> 
+        mutate(source_name = ifelse(source_name %in% c('NY Times', 'NY Times, Gov Tech'), 'NYTimes', source_name)) |> 
+        mutate(source_name = ifelse(source_name %in% c('Wired, CBNC', 'Wired, Digital Trends'), 'Wired', source_name)) |> 
+        mutate(source_name = ifelse(source_name %in% c('Naked Security, NBC News', 'Naked Security, New York Times'), 'NYTimes', source_name)) |> 
+        mutate(source_name = ifelse(source_name %in% c('Computer World, Hacker News'), 'Computer World', source_name)) |> 
+        mutate(source_name = ifelse(source_name %in% c('Korea Times, CNet'), 'Korea Times', source_name)) |> 
+        mutate(source_name = ifelse(source_name %in% c('NBC29'), 'NBC', source_name)) |> 
+        mutate(source_name = ifelse(source_name %in% c('Reuters, Privacy Rights'), 'Reuters', source_name)) |> 
+        mutate(source_name = ifelse(source_name == 'GCN, US Gov', 'GCN', source_name))
+
+# Clean sector
+
+# Aggregate smaller sectors to their most logical parent
+
+data <- data |> 
+  mutate(sector = ifelse(sector == 'government, military', 'government', sector)) |> 
+  mutate(sector = ifelse(sector == 'government, healthcare', 'government', sector)) |> 
+  mutate(sector = ifelse(sector == 'military, healthcare', 'healthcare', sector)) |> 
+  mutate(sector = ifelse(sector == 'web, military', 'web', sector)) |> 
+  mutate(sector = ifelse(sector == 'web, gaming', 'web', sector)) |> 
+  mutate(sector = ifelse(sector == 'tech, app', 'tech', sector)) |> 
+  mutate(sector = ifelse(sector == 'web, tech', 'tech', sector)) |> 
+  mutate(sector = ifelse(sector == 'tech, retail', 'retail', sector)) |> 
+  mutate(sector = ifelse(sector == 'tech, web', 'web', sector)) |> 
+  mutate(sector = ifelse(sector == 'legal', 'financial', sector))
+
+
+# Clean year
+
+data <- data |> 
+  # Per the article, the breach is actually from 2019
+  mutate(year = ifelse(year == 1999, 2019, year))
+
+cat('Cleaned data contains', dim(data)[1], 'rows and', dim(data)[2], 'columns.')
+
+```
+
+# Explore Data
+
+Now that our data has been cleaned, we can begin exploring it. We can check univariate and bivariate distributions to look for patterns which can guide the product we end up creating.
+
+Let's start asking questions of our data!
+
+**What is the distribution of records_lost?**
+
+Records_lost appears to follow a power distribution. We can see that the distribution normalizes nicely when log transformed. Despite a slight uptick towards the extreme high numbers, checking the articles confirms that the counts are correct.
+
+```{r records_lost_hist}
+
+data |> 
+  ggplot(aes(x = records_lost)) +
+  geom_histogram(fill = 'lightpink', color = 'black', bins = 100) +
+  theme_minimal() +
+  labs(title = 'Distribution of Records Lost in Breaches') +
+  theme(plot.title = element_text(hjust = 0.5, face = 'bold'),
+        axis.title = element_blank()) +
+  scale_x_continuous(labels = ~ format(.x, scientific = FALSE))
+
+
+data |> 
+  filter(records_lost < 10000000) |> 
+  ggplot(aes(x = records_lost)) +
+  geom_histogram(bins = 50, fill = 'lightpink', color = 'black') +
+  theme_minimal() +
+  labs(title = 'Distribution of Records Lost in Breaches - Under 10M Records') +
+  theme(plot.title = element_text(hjust = 0.5, face = 'bold'),
+        axis.title = element_blank())
+
+data |> 
+  ggplot(aes(x = log(records_lost))) +
+  geom_histogram(fill = 'lightgrey', color = 'black', bins = 50) +
+  theme_minimal() +
+  labs(title = 'Log-Transformed Distribution of Records Lost') +
+  theme(plot.title = element_text(hjust = 0.5, face = 'bold'),
+        axis.title = element_blank()) +
+  scale_x_continuous(labels = ~ format(.x, scientific = FALSE))
+
+data |> 
+  arrange(desc(records_lost)) |>
+  select(entity, records_lost, sector, x1st_source_link) |> 
+  head(5) |> 
+  kable()
+
+data |> 
+  arrange(desc(records_lost)) |> 
+  select(entity, records_lost, sector, x1st_source_link) |> 
+  tail(5) |> 
+  kable()
+```
+
+However, at the low end following the link for Wendy's indicates that 1,025 locations were exposed.
+
+Taking the average annual gross sales of [\$1,892,827](https://www.franchisechatter.com/2023/03/10/fdd-talk-wendys-franchise-costs-fees-average-revenues-and-or-profits-2023-review/) and assuming an average order size of \$15, that gives us an average of about 10k customers per month. Assuming 50% are repeat customers and that the exposure lasted for three months, I will impute 20k customers per store, giving us an exposure of 20,500,000. This makes sense, as the article references a breach at Target that exposed 30 million customer records as a comparison.
+
+```{r fix_wendys}
+
+# Impute estimate of records_lost for Wendy's
+data <- data |> 
+          mutate(records_lost = ifelse(entity == "Wendy's", 20500000, records_lost))
+
+
+```
+
+**Have the number of breaches changed over time?**
+
+We see that breaches (or at least the reporting of breaches), has steadily increased. There is decent fluctuation from year-to-year, which might reflect ad-hoc reporting rather than true fluctuations in breach rates.
+
+```{r breaches_over_time}
+
+data |> 
+  group_by(year) |> 
+  summarize(N = n()) |> 
+  ggplot(aes(x = year, y = N)) +
+  geom_col(fill = 'red', color = 'black') +
+  theme_minimal() +
+  labs(title = 'Number of Breaches Reported Over Time') +
+  theme(plot.title = element_text(hjust = 0.5, face = 'bold'),
+        axis.title = element_blank())
+
+```
+
+**Have the number of records lost changed over time?**
+
+Lost records follows a similar trend to breaches, with 2018 being a particularly bad year. However, stories for 2019 only appear to reach June 2019, so it's likely our dataset cuts off at that point and 2019 actually had as many or more lost records than 2018.
+
+```{r records_lost_over_time}
+
+data |> 
+  filter(!is.na(records_lost)) |> 
+  group_by(year) |> 
+  summarize(records = sum(records_lost)) |> 
+  ggplot(aes(x = year, y = records)) +
+  geom_col(fill = 'orange', color = 'black') +
+  theme_minimal() +
+  labs(title = 'Number of Records Lost Over Time') +
+  theme(plot.title = element_text(hjust = 0.5, face = 'bold'),
+        axis.title = element_blank())
+
+data |> 
+  filter(year == 2019) |> 
+  mutate(extracted_month = str_extract(story, "^[^.]*")) |> 
+  select(extracted_month) |> 
+  unique() |> 
+  kable()
+
+
+```
+
+**How has the average size of a breach changed over time?**
+
+Interestingly, our average breach size does not show the same linear growth pattern. Perhaps large breaches take longer to organize, and thus don't occur at annual intervals?
+
+```{r avg_breach_size}
+
+data |> 
+  group_by(year) |> 
+  summarize(size = sum(records_lost) / n()) |> 
+  ggplot(aes(x = year, y = size)) +
+  geom_col(fill = 'purple', color = 'black') +
+  theme_minimal() +
+  labs(title = 'Average Breach Size Over Time') +
+  theme(plot.title = element_text(hjust = 0.5, face = 'bold'),
+        axis.title = element_blank())
+
+```
+
+When we look at the largest breaches, we find that in fact they are not evenly distributed. The number of large breaches has increased over time. So not only are we getting more breaches, we are seeing larger ones on average and more very large ones. This is bad news!
+
+```{r large_breaches}
+
+data |> 
+  mutate(large_breach = ifelse(records_lost > 76000000, 1, 0)) |> 
+  group_by(year) |> 
+  summarize(large_breaches = sum(large_breach)) |> 
+  ggplot(aes(x = year, y = large_breaches)) +
+  geom_col(fill = 'cyan', color = 'black') +
+  theme_minimal() +
+  labs(title = 'Count of Breaches in Top 10%') +
+  theme(plot.title = element_text(hjust = 0.5, face = 'bold'),
+        axis.title = element_blank())
+
+```
+
+**Have certain methods become more popular?**
+
+We see that the largest increases in breaches have come from hacks and poor security. This has business implications: perhaps we should rethink our current level of investment in cybersecurity?
+
+```{r methods_over_time}
+
+# Colorblind palette
+cbPalette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", 
+               "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+
+# Breaches by method over time
+data |> 
+  # filter(interesting_story == 'Yes') |> 
+  group_by(year, method) |> 
+  summarize(N = n(), .groups = 'drop') |> 
+  ggplot(aes(x = year, y = N, color = method)) +
+  geom_line(linewidth = 1) +
+  theme_minimal() +
+  scale_color_manual(values = cbPalette) +
+  labs(title = 'Breach Methods Over Time - Breach Count') +
+  theme(plot.title = element_text(hjust = 0.5, face = 'bold'),
+        axis.title = element_blank(),
+        legend.title = element_blank())
+
+# Records lost by method over time
+data |> 
+  filter(!is.na(records_lost)) |>  
+  group_by(year, method) |> 
+  summarize(N = sum(records_lost), .groups = 'drop') |> 
+  ggplot(aes(x = year, y = N, color = method)) +
+  geom_line(linewidth = 1) +
+  theme_minimal() +
+  scale_color_manual(values = cbPalette) +
+  scale_y_continuous(labels = function(x) paste0(round(x / 1e6, 1), "M")) +
+  labs(title = 'Breach Methods Over Time - Records Lost') +
+  theme(plot.title = element_text(hjust = 0.5, face = 'bold'),
+        axis.title = element_blank(),
+        legend.title = element_blank())
+
+```
+
+**Who are the biggest breach victims?**
+
+```{r breach_victims}
+
+data |> 
+  group_by(entity) |> 
+  summarize(N = n(), .groups = 'drop') |> 
+  filter(N > 1) |> 
+  arrange(N) |> 
+  mutate(entity = factor(entity, levels = unique(entity))) |> 
+  ggplot(aes(x = N, y = entity)) +
+  geom_col(fill = 'lightblue', color = 'black') +
+  theme_minimal() +
+  labs(title = 'Repeat Breach Victims',
+       x = '# Breaches') +
+  theme(plot.title = element_text(hjust = 0.5, face = 'bold'),
+        axis.title.y = element_blank())
+
+```
+
+## Interesting Stories - A PR Nightmare?
+
+Certain breaches have been classified as "interesting stories". Presumably, this kind of story is more likely to get picked up and shared, resulting in bad press for our organization. As such, they are best avoided. Let's see what we can learn about the characteristics of these stories to make sure we don't become one.
+
+**Does the size of the breach correlate with interesting_story?**
+
+In the raw data chart, it appears that interesting stories have more large-loss breaches. However, the y-axis has been cut off to keep the inter-quartile range readable. When log-transformed, we see that the distributions are much more similar. A Mann-Whitney U test fails to find a statistically significant difference, reinforcing the notion that there is not much difference between these groups.
+
+```{r records_lost_vs_interesting_story}
+options(scipen=999)
+
+data |> 
+  ggplot(aes(x = interesting_story, y = records_lost, fill = interesting_story)) +
+  geom_violin() +
+  geom_boxplot(width = 0.1, fill = 'white') +
+  ylim(0,10000000) +
+  theme_minimal() +
+  labs(title = 'Distribution of Records Lost in Breach') +
+  scale_y_continuous(labels = function(x) paste0(round(x / 1e6, 1), "M")) +
+  theme(plot.title = element_text(hjust = 0.5, face = 'bold'),
+        axis.title = element_blank(),
+        legend.position = 'none') +
+  scale_fill_manual(values = cbPalette)
+
+data |> 
+  ggplot(aes(x = interesting_story, y = log(records_lost), fill = interesting_story)) +
+  geom_violin() +
+  geom_boxplot(width = 0.1, fill = 'white') +
+  # ylim(0,10000000) +
+  theme_minimal() +
+  labs(title = 'Log Distribution of Records Lost in Breach') +
+  theme(plot.title = element_text(hjust = 0.5, face = 'bold'),
+        axis.title = element_blank(),
+        legend.position = 'none') +
+  scale_fill_manual(values = cbPalette)
+
+# Conduct Mann-Whitney U test to identify whether the difference is significant
+
+group1 <- data |> filter(interesting_story == 'Yes') |> select(records_lost) |> pull()
+
+group2 <- data |> filter(interesting_story == 'No') |> select(records_lost) |> pull()
+
+# Conducting the Mann-Whitney U test
+test_result <- wilcox.test(group1, group2, alternative = "two.sided")
+
+# Printing the test results
+print(test_result)
+```
+
+**Does the source correlate with interesting_story?**
+
+The Guardian has the highest success rate, (7% of stories are interesting) and The Register does not have a single interesting story despite a relatively high number of publications (14).
+
+Still, no strong pattern emerges that certain publications are more likely to have interesting stories. So sending a box of cigars to the chief editor of Wired isn't going to cut it.
+
+```{r source_vs_interesting}
+
+# Create table with interesting story counts by source
+
+data |> 
+  group_by(interesting_story,source_name) |> 
+  summarize(N = n(), .groups = 'drop') |> 
+  pivot_wider(names_from = interesting_story, values_from = N) |> 
+  mutate(No = ifelse(is.na(No), 0, No),
+         Yes = ifelse(is.na(Yes), 0, Yes),
+    total = No + Yes,
+    pct_sig = Yes / total) |> 
+  arrange(desc(Yes)) |> 
+  head(20) |> 
+  kable()
+
+
+# Visualize counts for all sources with at least one story
+
+# Filter to sources with at least one interesting story
+interesting_sources <- data |> 
+  filter(interesting_story == 'Yes') |> 
+  select(source_name) |> 
+  unique() |> pull()
+
+# Filter to sources with more than one story total
+multiple_stories <- data |> 
+  group_by(source_name) |> 
+  summarize(N = n(), .groups = 'drop') |> 
+  filter(N > 1) |> 
+  select(source_name) |> 
+  pull()
+
+
+data_filtered <- data |> 
+  filter(source_name %in% interesting_sources) |> 
+  filter(source_name %in% multiple_stories) |> 
+  group_by(source_name) |> 
+  summarize(N = n(), .groups = 'drop') |> 
+  arrange(N)
+
+# Reorder source_name factor levels
+data_filtered$source_name <- factor(data_filtered$source_name, levels = data_filtered$source_name)
+
+# Merge back the filtered data with the reordered factor levels
+data_reordered <- data |> 
+  filter(source_name %in% interesting_sources) |> 
+  filter(source_name %in% multiple_stories) |> 
+  mutate(source_name = factor(source_name, levels = levels(data_filtered$source_name)))
+
+# Plot
+ggplot(data_reordered, aes(y = source_name, fill = interesting_story)) +
+  geom_bar(color = 'black') +
+  labs(x = "Count", y = "Source Name", fill = "Interesting Story") +
+  theme_minimal() +
+  scale_fill_manual(values = cbPalette) +
+  labs(title = 'Stories by Source') +
+  theme(plot.title = element_text(hjust = 0.5, face = 'bold'),
+        axis.title = element_blank())
+
+# Visualize relationship between interesting and not interesting story counts
+
+data |> 
+  group_by(interesting_story,source_name) |> 
+  summarize(N = n(), .groups = 'drop') |> 
+  pivot_wider(names_from = interesting_story, values_from = N) |> 
+  mutate(No = ifelse(is.na(No), 0, No),
+         Yes = ifelse(is.na(Yes), 0, Yes),
+    Total = No + Yes,
+    prop_interesting = Yes / Total) |> 
+  ggplot(aes(x = No, y = Yes)) +
+  geom_point(size = 2.5, color = 'darkblue') +   
+  theme_minimal() +
+  labs(title = 'Not Interesting vs. Interesting Stories by Publication',
+       x = 'Not Interesting',
+       y = 'Interesting') +
+  theme(plot.title = element_text(hjust = 0.5, face = 'bold'),
+        legend.position = 'none')
+
+
+# Get table showing proportion of all interesting stories by source
+
+data |> 
+  filter(interesting_story == 'Yes') |> 
+  group_by(source_name) |> 
+  summarize(N = n(), .groups = 'drop') |> 
+  mutate(prop = N / sum(N)) |> 
+  arrange(desc(prop)) |> 
+  kable()
+
+```
+
+**Does the method of the breach correlate with interesting_story?**
+
+Lost devices and oops! are over-represented as interesting stories. Perhaps because accidents like these stand out?
+
+```{r method_vs_interesting}
+
+
+data |> 
+  group_by(method) |> 
+  summarize(prop_interesting = mean(ifelse(interesting_story == 'Yes', 1, 0)),
+            N = n()) |> 
+  ggplot(aes(x = method, y = prop_interesting, fill = method)) +
+  geom_col(color = 'black') +
+  geom_text(aes(label = N), vjust = 1.5, color = 'black', size = 3.5) +
+  scale_fill_manual(values = cbPalette) +
+  theme_minimal() +
+  labs(title = 'Proportion of Interesting Stories by Method',
+       x = 'Method',
+       y = 'Proportion of Stories Rated Interesting') +
+  theme(plot.title = element_text(hjust = 0.5, face = 'bold'),
+        legend.position = 'none',
+        axis.title = element_blank())
+
+```
+
+**Does the data sensitivity correlate with interesting_story?**
+
+Data breaches that involve social security numbers, financial information, or all information are more likely to be rated as interesting. This is understandable, as the immediate consequences for consumers are greater.
+
+```{r sensitivity_vs_interesting}
+
+data |> 
+  group_by(data_sensitivity) |> 
+  summarize(prop_interesting = mean(ifelse(interesting_story == 'Yes', 1, 0)),
+            N = n()) |> 
+  ggplot(aes(x = data_sensitivity, y = prop_interesting, fill = data_sensitivity)) +
+  geom_col(color = 'black') +
+  geom_text(aes(label = N), vjust = 1.5, color = 'black', size = 3.5) +
+  scale_fill_manual(values = cbPalette) +
+  theme_minimal() +
+  labs(title = 'Proportion of Interesting Stories by Data Sensistivity',
+       x = 'Data Sensitivity',
+       y = 'Proportion of Stories Rated Interesting') +
+  theme(plot.title = element_text(hjust = 0.5, face = 'bold'),
+        legend.position = 'none',
+        axis.title = element_blank()) +
+  scale_x_discrete(labels = c('Just email', 'Personal details','Credit card', 
+                              'Health', 'Full details'))
+
+```
+
+**Does the data sensitivity correlate with method?**
+
+We see that hacks are most likely to obtain online information or personal details. This makes sense, as those are the fields most likely to be stored in a public-facing website.
+
+The risk of full details being disclosed is highest from an inside job. This is also reasonable, because access to an internal database exposes much more data. When combined with the proportion of full-detail disclosures that are rated as interesting stories, we should review that internal data is locked down. Users should not be able to remove data from the system, either digitally or via external devices.
+
+Fisher's exact test allows us to reject the null hypothesis at alpha = 0.05 and conclude that there is an association between the method used and the sensitivity of the data exposed.
+
+```{r sensitivity_vs_method}
+
+# Group by and summarize, then calculate the proportions
+data_normalized <- data |> 
+  group_by(method, data_sensitivity) |> 
+  summarize(N = n(), .groups = 'drop') |> 
+  group_by(method) |> 
+  mutate(Proportion = N / sum(N))
+
+# Create the 100% stacked column chart
+ggplot(data_normalized, aes(x = method, y = Proportion, 
+                            fill = data_sensitivity)) +
+  geom_col(color = 'black') +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(x = "Method", y = "Proportion", fill = "Data Sensitivity") +
+  theme_minimal() +
+  scale_fill_manual(values = cbPalette, labels = c('Just email', 
+                                                   'Personal details',
+                                                   'Credit card', 'Health', 
+                                                   'Full details'))
+  
+
+# Fisher's exact test
+
+contingency_table <- data |> 
+  group_by(data_sensitivity, method) |> 
+  summarize(N = n(), .groups = 'drop') |> 
+  pivot_wider(names_from = data_sensitivity, values_from = N, 
+              values_fill = list(N = 0))
+
+contingency_matrix <- as.matrix(contingency_table[,-1])
+rownames(contingency_matrix) <- contingency_table$interesting_story
+
+# Perform Fisher's exact test
+fisher_result <- fisher.test(contingency_matrix, workspace = 2e8, 
+                             simulate.p.value = TRUE)
+
+# Print the Fisher's test result
+print(fisher_result)
+
+```
+
+**Does the sector correlate with interesting_story?**
+
+The financial sector and telecoms have the highest proportions of interesting stories for sectors with at least 5 stories. I suspect these sectors are likely to have very large breaches. Let's check that next.
+
+```{r sector_vs_interesting}
+
+data |> 
+  group_by(sector) |> 
+  summarize(prop_interesting = mean(ifelse(interesting_story == 'Yes', 1, 0)),
+            N = n()) |> 
+  filter(N >= 5) |> 
+  ggplot(aes(x = sector, y = prop_interesting, fill = sector)) +
+  geom_col(color = 'black') +
+  geom_text(aes(label = N), vjust = -0.5, color = 'black', size = 3.5) +
+  # scale_fill_manual(values = cbPalette) +
+  theme_minimal() +
+  labs(title = 'Proportion of Interesting Stories by Sector') +
+  theme(plot.title = element_text(hjust = 0.5, face = 'bold'),
+        legend.position = 'none',
+        axis.title = element_blank(),
+        axis.text.x = element_text(angle = 45, hjust = 1.1, vjust = 1)) +
+  ylim(0,0.45)
+
+```
+
+**What is the size of the breach across sectors?**
+
+The breach size does not appear to be the driving factor in the prominence of the financial and telecoms sectors. On second thought, this makes sense. Our Mann-Whitney U test did not show a significant difference in the distributions of records lost in the "Interesting" vs. "Not Interesting" story groups.
+
+```{r breach_size_by_sector}
+
+data |> 
+  ggplot(aes(x = sector, y = records_lost, fill = sector)) +
+  geom_boxplot() +
+  ylim(0, 1000000) +
+
+
+  # scale_fill_manual(values = cbPalette) +
+  theme_minimal() +
+  labs(title = 'Records Lost by Sector') +
+  theme(plot.title = element_text(hjust = 0.5, face = 'bold'),
+        legend.position = 'none',
+        axis.text.x = element_text(angle = 45, hjust = 1.1, vjust = 1),
+        axis.title = element_blank())
+
+```
+
+**Perhaps it is the type of information lost or the method that makes these sectors prominent?**
+
+We are getting a bit more complicated here, with more variables here than we can easily visualize.
+
+Let's build a logistic model to try to quantify the relationship. Because we don't have a lot of data to work with, I will select the variables I expect to have the highest correlations and dichotomize sector into finance/telecom vs. other.
+
+```{r inferential_logistic_model}
+
+data <- data |> 
+          mutate(finance_telecom = factor(ifelse(sector %in% c('financial', 
+                                                               'telecoms'), 
+                                                 'Yes', 'No'), 
+                                          levels = c('No', 'Yes')))
+
+interestingModel_inference <- glm(interesting_story ~ finance_telecom + 
+                                    data_sensitivity +
+                                   records_lost,
+                         data = data |> filter(!is.na(records_lost)),
+family = 'binomial')
+
+
+
+summary(interestingModel_inference)
+
+# Calculate Pseudo R-squared to check model fit - higher is better
+
+logisticPseudoR2s <- function(LogModel) {
+  dev <- LogModel$deviance
+  nullDev <- LogModel$null.deviance
+  modelN <- length(LogModel$fitted.values)
+  R.l <- 1 - dev / nullDev
+  R.cs <- 1 - exp( -(nullDev - dev) / modelN)
+  R.n <- R.cs / (1 - ( exp (-(nullDev / modelN))))
+  cat('Pseudo R-squared for logistic regression\n')
+  cat('Hosmer/Lemeshow:', round(R.l, 3), '\n')
+  cat('Cox & Snell:', round(R.cs, 3), '\n')
+  cat('Nagelkerke:', round(R.n, 3), '\n')
+}
+
+logisticPseudoR2s(interestingModel_inference)
+```
+
+It appears that even when controlling for data sensitivity and records lost the financial and telecom industries are over-represented in the "interesting stories" category. Perhaps this is related to the relative prominence of these industries in publications.
+
+The code for checking the validity of the model can be found in the appendix.
+
+# DS Technique
+
+Now that we have a sense of the relationship between our variables and whether a story is interesting or not, let's build two models to predict the likelihood of a breach being noted as interesting. First, we will adjust our linear model to be suitable for prediction. Then, we will compare its performance to a random forest model.
+
+```{r predictive_models}
+
+
+# Logistic model
+
+log_model <- 
+  logistic_reg() |> 
+  set_engine('glm')
+
+log_wflow <- 
+  workflow() |> 
+  add_formula(
+    interesting_story ~ sector + method + data_sensitivity + records_lost) |> 
+  add_model(log_model)
+
+
+log_fit <-  
+  log_wflow |> 
+  fit(data = data |> filter(!is.na(records_lost)))
+
+# Random forest model
+rf_model <- 
+  rand_forest(trees = 1000) |> 
+  set_engine('ranger') |> 
+  set_mode('classification')
+
+rf_wflow <- 
+  workflow() |> 
+  add_formula(
+    interesting_story ~ sector + method + data_sensitivity + records_lost
+  ) |> 
+  add_model(rf_model)
+
+rf_fit <- rf_wflow |> 
+  fit(data = data |> filter(!is.na(records_lost)))
+
+
+set.seed(6501)
+
+data_folds <- vfold_cv(data |> filter(!is.na(records_lost)), v = 10, repeats = 5)
+
+
+keep_pred <- control_resamples(save_pred = TRUE, save_workflow = TRUE)
+
+log_res <- 
+  log_wflow |> 
+  fit_resamples(resamples = data_folds, control = keep_pred)
+
+collect_metrics(log_res)
+
+
+
+rf_res <- 
+  rf_wflow |> 
+  fit_resamples(resamples = data_folds, control = keep_pred)
+
+collect_metrics(rf_res)
+
+```
+
+In this case, our linear model has slightly outperformed its nonparametric counterpart. This is not a huge surprise with such a small dataset. Because model performance is so similar, I recommend using the linear model for a few reasons:
+
+-   It is much faster to retrain and deploy.
+-   Interpretable coefficients make it easier to understand which factors are most important.
+-   It is less likely to overfit on retraining.
+
+However, it would be worth looking at more ensemble models if we obtained a larger dataset. In general, these models perform better as they obtain more data, and it would allow us to incorporate variables that might be useful like the text component from the "story" variable.
+
+```{r save_linear_model}
+
+saveRDS(log_fit, 'trained_predictive_logit_model.rds')
+
+```
+
+# Take-Aways
+
+It seems clear that data breaches are becoming more common as time goes on. While no breach is good, those that generate large amounts of negative publicity for an organization can be particularly harmful. Based on the data we have examined today, I would make the following recommendations:
+
+1.  Re-examine our current cybersecurity budget. Are we sufficiently staffed to prevent hacks and prevent exploits?
+2.  Ensure that internal employees and contractors are unable to remove data from their workspaces.
+3.  Use the predictive model to assess the potential risk of an "interesting" breach based on likely scenarios. Use this information to assess our highest risk scenarios and prioritize their mitigation.
+
+Implementing these recommendations is likely to reduce our risk of breach in general, and our risk of a PR nightmare caused by a breach in particular.
+
+## Appendix
+
+The next few items contain code used for checking the validity of my inferential model. It will not be of interest to business users, but is crucial for determining the validity of the inference made above.
+
+```{r model_checking}
+
+
+## Check residuals
+
+data_res <- data |> 
+              filter(!is.na(records_lost)) |> 
+              mutate(predicted.probabilities = fitted(interestingModel_inference),
+                     standardized.residuals = rstandard(interestingModel_inference),
+                     studentized.residuals = rstudent(interestingModel_inference),
+                     dfbeta_int = dfbeta(interestingModel_inference)[1],
+                     dfbeta_pred1 = dfbeta(interestingModel_inference)[2],
+                     dffit = dffits(interestingModel_inference),
+                     leverage = hatvalues(interestingModel_inference))
+
+# Check that no more than 5% of standardized/studentized residuals have
+# an absolute value greater than 1.96 and no more than 1% have an
+# absolute value greater than 2.58.
+
+data_res |> 
+  mutate(stan_gt_196 = ifelse(abs(standardized.residuals) > 1.96, 1, 0),
+         stud_gt_196 = ifelse(abs(standardized.residuals) > 1.96, 1, 0),
+         stan_gt_258 = ifelse(abs(standardized.residuals) > 2.58, 1, 0),
+         stud_gt_258 = ifelse(abs(standardized.residuals) > 2.58, 1, 0)) |> 
+  filter(!is.na(stan_gt_196)) |> 
+  summarize(stan_196_prop = round(mean(stan_gt_196),2),
+            stud_196_prop = round(mean(stud_gt_196),2),
+            stan_258_prop = round(mean(stan_gt_258),2),
+            stud_258_prop = round(mean(stud_gt_258),2))
+
+# Check that dfbeta is less than 1 for the intercept and the predictor of
+# interest
+
+data_res |> 
+  select(dfbeta_int, dfbeta_pred1) |> 
+  unique()
+
+
+# Check that we have at least 10 events per predictor
+n <- nrow(data |> filter(!is.na(records_lost)))
+events <- data |> filter(!is.na(records_lost)) |> 
+  summarize(sum(ifelse(interesting_story == 'Yes', 1, 0))) |> 
+  pull()
+predictors <- length(coef(interestingModel_inference)) - 1
+
+events_per_predictor <- events / predictors
+print(events_per_predictor) 
+
+
+# Plot leverage values - no more than 10% should exceed threshold
+ggplot(data_res, aes(x = 1:nrow(data_res), y = leverage)) + 
+  geom_point() + 
+  geom_hline(yintercept = 3 * (predictors + 1) / n, linetype = "dashed", 
+             color = "red")
+
+
+## Check assumptions
+
+# Check that no VIF is over 10
+
+vif(interestingModel_inference)
+
+# Check the linearity of the logit
+# The log_records_lost variable should have a p-value greater than 0.05.
+
+linearity_data <- data |> 
+                    filter(!is.na(records_lost)) |> 
+                    mutate(log_records_lost = log(records_lost)*records_lost)
+
+linearityTestModel <- glm(interesting_story ~ sector + method + data_sensitivity + records_lost + as.factor(year) +
+                            log_records_lost,
+                         data = linearity_data,
+                         family = 'binomial')
+
+summary(linearityTestModel)
+
+
+# Plot predictions against actuals
+
+data_res |> 
+  ggplot(aes(x = interesting_story, y = predicted.probabilities)) +
+  geom_boxplot() +
+  labs(title = "Predictions vs. Actuals", 
+       x = "Interesting Story", y = "Prediction") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = 'bold'))
+
+```
